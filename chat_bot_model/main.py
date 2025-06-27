@@ -1,79 +1,116 @@
 """
-主程序入口
+核心模型加载与推理模块
 """
 from modelscope import AutoTokenizer, AutoModelForCausalLM
 import torch
-from transformers.utils.quantization_config import BitsAndBytesConfig
+import re
+from typing import List, Optional, Dict
+
+MODEL_DIR = './Qwen3-1.7B_quantized'
 
 def load_model():
-    """加载模型和tokenizer"""
+    """
+    从指定路径加载Qwen3-1.7B量化模型及对应的tokenizer。
+    
+    Returns:
+        tuple: (tokenizer, model, model_name) 或 (None, None, None) 如果加载失败。
+    """
     try:
-        model_dir = './Qwen3-1.7B_quantized'  # 替换为你 snapshot_download 得到的路径
+        # 从模型路径中提取模型名称
+        model_name = MODEL_DIR.strip('./').replace('/', '_')
         
-        print("正在加载tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+        print("INFO: 正在加载tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
         
-        print("正在加载模型...")
-
-        # 新增：bnb 4bit 配置
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
-
+        print("INFO: 正在加载模型...")
         model = AutoModelForCausalLM.from_pretrained(
-            model_dir,
+            MODEL_DIR,
             device_map="auto",
             torch_dtype=torch.float16,
             trust_remote_code=True,
         )
         
-        return tokenizer, model
+        print(f"INFO: 模型加载成功，模型名称: {model_name}")
+        return tokenizer, model, model_name
     except Exception as e:
-        print(f"模型加载失败: {e}")
-        return None, None
+        print(f"ERROR: 模型加载失败: {e}")
+        return None, None, None
 
-def generate_response(tokenizer, model, input_text, max_new_tokens=500):
-    """生成回复"""
+def generate_chat_response(
+    tokenizer, 
+    model, 
+    messages: List[Dict[str, str]], 
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+    top_p: float = 0.8,
+    top_k: Optional[int] = 20,
+    repetition_penalty: float = 1.1,
+    do_sample: bool = True,
+    **kwargs
+) -> Optional[str]:
+    """
+    使用模型的聊天模板生成回复。
+
+    此函数处理以下流程:
+    1. 根据输入消息构建符合模型要求的prompt。
+    2. 在控制台打印完整的prompt和模型原始输出，用于调试。
+    3. 从模型原始输出中移除<think>...</think>思考过程标签。
+    4. 返回清理后的、可直接展示给用户的回复。
+
+    Args:
+        tokenizer: 模型的分词器。
+        model: 加载的语言模型。
+        messages: OpenAI格式的消息列表。
+        max_tokens: 最大生成token数。
+        temperature: 采样温度。
+        top_p: 核采样概率。
+        top_k: Top-k采样。
+        repetition_penalty: 重复惩罚系数。
+        do_sample: 是否进行采样。
+
+    Returns:
+        清理后的字符串回复，或在失败时返回None。
+    """
     try:
-        inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+        # 使用 tokenizer 的 chat template 功能格式化输入
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        print(f"DEBUG: 格式化后的 Prompt (发送至模型):\n---\n{formatted_prompt}\n---")
+        
+        inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
         input_len = inputs['input_ids'].shape[1]
+        
+        # 配置生成参数
+        generation_kwargs = {
+            'max_new_tokens': max_tokens,
+            'do_sample': do_sample,
+            'temperature': temperature,
+            'top_p': top_p,
+            'pad_token_id': tokenizer.eos_token_id,
+            'repetition_penalty': repetition_penalty,
+        }
+        
+        if top_k is not None:
+            generation_kwargs['top_k'] = top_k
+            
         outputs = model.generate(
             **inputs, 
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.8,
-            top_p=0.9,
-            pad_token_id=tokenizer.eos_token_id,
-            repetition_penalty=1.2,
+            **generation_kwargs
         )
-        # 只decode新生成的部分
-        response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
-        return response
+        
+        # 解码模型原始输出（包含新生成的部分）
+        raw_response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+        print(f"DEBUG: 模型的原始输出 (可能包含<think>标签):\n---\n{raw_response}\n---")
+
+        # 使用正则表达式移除<think>...</think>标签及其内容
+        cleaned_response = re.sub(r'<think>.*?</think>\s*', '', raw_response, flags=re.DOTALL).strip()
+        
+        return cleaned_response
+        
     except Exception as e:
-        print(f"生成失败: {e}")
-        return None
-
-def main():
-    """主函数"""
-    # 加载模型
-    tokenizer, model = load_model()
-    
-    if tokenizer is None or model is None:
-        print("模型加载失败，请检查模型路径和依赖包")
-        exit(1)
-    
-    # 推理
-    input_text = "嘿你好啊，今天怎么样？"
-    print(f"输入: {input_text}")
-    
-    response = generate_response(tokenizer, model, input_text)
-    if response:
-        print(f"输出: {response}")
-    else:
-        print("生成失败")
-
-if __name__ == "__main__":
-    main() 
+        print(f"ERROR: 生成回复时出错: {e}")
+        return None 
