@@ -6,7 +6,7 @@ import torch
 import re
 from typing import List, Optional, Dict
 
-MODEL_DIR = './Qwen3-1.7B_quantized'
+MODEL_DIR = './Qwen3-32B-quantized'
 
 def load_model():
     """

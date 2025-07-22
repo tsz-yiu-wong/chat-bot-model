@@ -75,11 +75,6 @@ def check_token(request: Request, authorization: Optional[str]):
     if origin and ALLOWED_FRONTEND_URLS and origin in ALLOWED_FRONTEND_URLS:
         print(f"INFO: 请求来源 '{origin}' 在白名单中，跳过Token验证。")
         return
-
-    # 2. 如果来源不在白名单，则回退到token验证
-    if not REQUIRED_TOKEN:
-        print("WARN: 未设置 CHAT_BOT_API_KEY 环境变量，所有非白名单来源的请求都将被允许。")
-        return
     
     if not authorization:
         raise HTTPException(
